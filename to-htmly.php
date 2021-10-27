@@ -55,7 +55,7 @@ function htmlyExportPost(array $post) {
 function htmlyGetPostFilename(array $post) {
     $publishedAt = (new DateTime($post['published_at']))->format('Y-m-d-H-i-s');
     $tags = $post['tags'];
-    $slug = fixInternalUrlSuffix(basename($post['slug']));
+    $slug = fixInternalUrlSuffix(basename($post['slug_htmly']));
 
     return sprintf('%s_%s_%s.md', $publishedAt, $tags, $slug);
 }
@@ -88,7 +88,7 @@ function htmlyExportPage(array $page) {
  * @throws Exception
  */
 function htmlyGetPageFilename(array $page) {
-    $slug = fixInternalUrlSuffix(basename($page['slug']));
+    $slug = fixInternalUrlSuffix(basename($page['slug_htmly']));
 
     return sprintf('%s.md', $slug);
 }
@@ -107,9 +107,9 @@ function htmlyGetMarkdownContent(array $item) {
 EOMD;
 
     $mdMetadata = [];
-    foreach (HTMLY_EXPORTED_METADATA as $metadata) {
+    foreach (HTMLY_EXPORTED_METADATA as $metadata => $tagName) {
         if (isset($item[$metadata])) {
-            $mdMetadata[] = "<!-- $metadata: {$item[$metadata]} -->";
+            $mdMetadata[] = "<!-- $tagName: {$item[$metadata]} -->";
         }
     }
 
@@ -143,6 +143,21 @@ function htmlyUpdateTags() {
     file_put_contents(HTMLY_TAGS_FILE, serialize($tags));
 }
 
+/**
+ * @param array $item
+ * @return void
+ */
+function htmlyPrepareSlug(array &$item) {
+    if (!isset($item['new_slug'])) {
+        return;
+    }
+    $item['slug_htmly'] = str_replace('_', '-', $item['new_slug']);
+}
+
+/**
+ * @param array $item
+ * @return void
+ */
 function htmlyCleanupContent(array &$item) {
     global $climate, $imagesToCopy, $linksMapping;
 
@@ -160,22 +175,12 @@ function htmlyCleanupContent(array &$item) {
     // IMAGES
     /** @var DOMElement $img */
     foreach ($doc->getElementsByTagName('img') as $img) {
-        $parentLink = null;
-        if ($img->parentNode->tagName === 'a'
-            && $img->parentNode->getAttribute('href') == $img->getAttribute('src')
-        ) {
-            $parentLink = $img->parentNode;
-        }
-
         $originalUrl = $img->getAttribute('src');
-        $newImageFilename = uniqid() . '_' . str_replace('%2F', '', basename($originalUrl));
+        $newImageFilename = htmlyGetImageFilename($originalUrl);
         $newImagePath = $newImageFilename;
         $newUrl = HTMLY_IMAGES_BASE_URL . $newImageFilename;
 
         $img->setAttribute('src', $newUrl);
-        if ($parentLink) {
-            $parentLink->setAttribute('href', $newUrl);
-        }
 
         $imagesToCopy[$originalUrl] = $newImagePath;
         $climate->whisper("IMAGE: $originalUrl => $newUrl");
@@ -184,6 +189,7 @@ function htmlyCleanupContent(array &$item) {
     // LINKS
     /** @var DOMElement $a */
     foreach ($doc->getElementsByTagName('a') as $a) {
+        // Internal links
         if (preg_match('#^https?://(www\.)?lanterne-rouge(\.over-blog\.org|\.info)/(?P<path>.*)$#i', $a->getAttribute('href'), $m)) {
             $originalUrl = $a->getAttribute('href');
             $originalSlug = $slug = $m['path'];
@@ -196,16 +202,37 @@ function htmlyCleanupContent(array &$item) {
             $a->setAttribute('href', $newUrl);
             $climate->whisper("LINK: $originalUrl => $newUrl");
         }
+        // Image links
+        elseif (in_array(strtolower(pathinfo($a->getAttribute('href'), PATHINFO_EXTENSION)), IMAGES_EXTENSIONS)) {
+            $originalUrl = $a->getAttribute('href');
+
+            $newImageFilename = htmlyGetImageFilename($originalUrl);
+            $newImagePath = $newImageFilename;
+            $newUrl = HTMLY_IMAGES_BASE_URL . $newImageFilename;
+
+            $a->setAttribute('href', $newUrl);
+
+            $imagesToCopy[$originalUrl] = $newImagePath;
+            $climate->whisper("IMAGE  LINK: $originalUrl => $newUrl");
+        }
     }
 
     $item['content_markdown_htmly'] = trim(htmlToMarkdown($doc->saveHTML()));
 }
 
 /**
+ * @param string $originalUrl
+ * @return string
+ */
+function htmlyGetImageFilename($originalUrl) {
+    return crc32($originalUrl) . '_' . str_replace('%2F', '', basename($originalUrl));
+}
+
+/**
  * @return void
  */
 function htmlyCopyImages() {
-    global $imagesToCopy;
+    global $imagesToCopy, $climate;
 
     $imagesData = json_decode(file_get_contents(IMAGES_MAPPING_FILE), true);
 
@@ -214,7 +241,9 @@ function htmlyCopyImages() {
     }
     foreach ($imagesToCopy as $sourceUrl => $targetPath) {
         if (!isset($imagesData[$sourceUrl])) {
-            throw new RuntimeException('Cannot find image mapping data for ' . $sourceUrl);
+            //throw new RuntimeException('Cannot find image mapping data for ' . $sourceUrl);
+            $climate->error('Cannot find image mapping data for ' . $sourceUrl);
+            return;
         }
         copy(IMAGES_DIR . '/' . $imagesData[$sourceUrl]['path'], HTMLY_IMAGES_DIR . '/' . $targetPath);
     }
@@ -235,16 +264,25 @@ function fixInternalUrlSuffix($url) {
 
 // ########################################################################
 
-$climate->cyan('POSTS');
+$climate->cyan('PREPARE LINKS');
 
-// Normalize posts links (=> {Y}/{m}/{slug})
-foreach ($data['posts']['post'] as $post) {
-    if (!isset($post['new_slug'])) {
+// Normalize posts and pages links (=> {Y}/{m}/{slug})
+foreach ($data['posts']['post'] as &$post) {
+    htmlyPrepareSlug($post);
+    if (!isset($post['slug_htmly'])) {
         continue;
     }
-    $linksMapping[$post['slug']] = $post['new_slug'];
+    $linksMapping[$post['slug']] = $post['slug_htmly'];
+}
+foreach ($data['pages']['page'] as &$page) {
+    htmlyPrepareSlug($page);
+    if (!isset($page['slug_htmly'])) {
+        continue;
+    }
+    $linksMapping[$page['slug']] = $page['slug_htmly'];
 }
 
+$climate->cyan('PROCESS POSTS');
 foreach ($data['posts']['post'] as $post) {
     $climate->bold()->info($post['title']);
     htmlyCleanupContent($post);
@@ -252,7 +290,7 @@ foreach ($data['posts']['post'] as $post) {
 }
 $climate->br();
 
-$climate->cyan('PAGES');
+$climate->cyan('PROCESS PAGES');
 
 foreach ($data['pages']['page'] as $page) {
     $climate->bold()->info($page['title']);
