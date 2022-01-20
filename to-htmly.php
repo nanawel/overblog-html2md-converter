@@ -151,7 +151,7 @@ function htmlyPrepareSlug(array &$item) {
     if (!isset($item['new_slug'])) {
         return;
     }
-    $item['slug_htmly'] = str_replace('_', '-', $item['new_slug']);
+    $item['slug_htmly'] = str_replace('_', '-', \VRia\Utils\NoDiacritic::filter($item['new_slug']));
 }
 
 /**
